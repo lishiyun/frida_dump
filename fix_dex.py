@@ -170,7 +170,7 @@ def convert_cdex_on_device(data, filename, adb_device):
 
     return True, converted_data
 
-def fix_dex_file(filepath, adb_device=None, force=False):
+def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
     """
     检查、修复并智能转译单个 DEX/CDEX 文件。
     """
@@ -211,8 +211,18 @@ def fix_dex_file(filepath, adb_device=None, force=False):
             print(f"[-] 错误: {filename} 数据长度不足，跳过处理。")
             return False
 
+    # 统计格式特征
+    if stats is not None:
+        if is_compact_dex:
+            stats['cdex'] = stats.get('cdex', 0) + 1
+        elif is_erased_magic:
+            stats['erased'] = stats.get('erased', 0) + 1
+        else:
+            stats['standard'] = stats.get('standard', 0) + 1
+
     # 1. 核心智能处理：如果是 Compact DEX (CDEX) 且有可用的 Android 设备，一键启动全自动在设标准转码流程
     if is_compact_dex:
+        print(f"[*] {filename}: [格式检测] 成功匹配 Compact DEX (CDEX) 文件结构特征！")
         if adb_device:
             # 读取 CDEX 内部偏移，精确计算裁剪无填充的原始大小
             data_size = struct.unpack("<I", data[104:108])[0]
@@ -318,15 +328,22 @@ def fix_dex_directory(dirpath, adb_device=None):
     print(f"[*] 找到 {len(dex_files)} 个包含 DEX/CDEX 签名后缀的文件，开始智能批处理...")
     fixed_count = 0
     skipped_count = 0
+    stats = {'standard': 0, 'cdex': 0, 'erased': 0}
 
     for f in sorted(dex_files):
         p = os.path.join(dirpath, f)
-        if fix_dex_file(p, adb_device=adb_device, force=False):
+        if fix_dex_file(p, adb_device=adb_device, force=False, stats=stats):
             fixed_count += 1
         else:
             skipped_count += 1
 
     print(f"\n[!] 批处理运行完毕！共转换/修复成功: {fixed_count} 个文件，跳过无需变动的正常文件: {skipped_count} 个。")
+    print(f"[*] ------------------------------------------------------------")
+    print(f"[*] 【DEX/CDEX 格式特征扫描统计】:")
+    print(f"[*]     1. 标准 DEX 格式 (Standard DEX): {stats['standard']} 个")
+    print(f"[*]     2. 紧凑 DEX 格式 (Compact DEX):  {stats['cdex']} 个")
+    print(f"[*]     3. 魔数擦除版 DEX (Erased Magic): {stats['erased']} 个")
+    print(f"[*] ------------------------------------------------------------")
 
 if __name__ == '__main__':
     print("=============================================")

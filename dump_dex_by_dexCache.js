@@ -13503,22 +13503,39 @@ function untagPointer(ptrVal) {
   return ptr("0x" + big.toString(16));
 }
 function isDexHeader(address) {
-  if (!address || address.isNull() || address.compare(ptr("0x1000")) < 0) {
-    return false;
-  }
-  try {
-    var untagged = untagPointer(address);
-    if (!Process.findRangeByAddress(untagged)) {
-      return false;
+    if (!address || address.isNull() || address.compare(ptr('0x1000')) < 0) {
+        return false;
     }
-    var b0 = address.readU8();
-    var b1 = address.add(1).readU8();
-    var b2 = address.add(2).readU8();
-    var b3 = address.add(3).readU8();
-    return b0 === 100 && b1 === 101 && b2 === 120 && b3 === 10;
-  } catch (e) {
+    try {
+        var untagged = untagPointer(address);
+        if (!Process.findRangeByAddress(untagged)) {
+            return false;
+        }
+        var b0 = address.readU8();
+        var b1 = address.add(1).readU8();
+        var b2 = address.add(2).readU8();
+        var b3 = address.add(3).readU8();
+
+        // 1. 标准 DEX (dex\n)
+        if (b0 === 0x64 && b1 === 0x65 && b2 === 0x78 && b3 === 0x0a) {
+            return true;
+        }
+
+        // 2. Compact DEX (cdex)
+        if (b0 === 0x63 && b1 === 0x64 && b2 === 0x65 && b3 === 0x78) {
+            return true;
+        }
+
+        // 3. 针对被擦除/修改魔数的宽松模式校验
+        var endianTag = address.add(40).readU32();
+        var headerSize = address.add(36).readU32();
+        if (endianTag === 0x12345678 && (headerSize === 0x70 || headerSize === 0x28)) {
+            return true;
+        }
+    } catch (e) {
+        return false;
+    }
     return false;
-  }
 }
 function longToPtr(longVal) {
   if (!longVal) {

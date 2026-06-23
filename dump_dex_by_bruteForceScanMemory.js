@@ -75,12 +75,27 @@ function verify(dexptr, range, enable_verify_maps) {
             return false;
         }
         try {
-            // 只要前 4 字节是 "dex\n"，直接无条件信任并放行！
             var b0 = dexptr.readU8();
             var b1 = dexptr.add(1).readU8();
             var b2 = dexptr.add(2).readU8();
             var b3 = dexptr.add(3).readU8();
-            return b0 === 0x64 && b1 === 0x65 && b2 === 0x78 && b3 === 0x0a;
+
+            // 1. 标准 DEX (dex\n)
+            if (b0 === 0x64 && b1 === 0x65 && b2 === 0x78 && b3 === 0x0a) {
+                return true;
+            }
+
+            // 2. Compact DEX (cdex)
+            if (b0 === 0x63 && b1 === 0x64 && b2 === 0x65 && b3 === 0x78) {
+                return true;
+            }
+
+            // 3. 针对被擦除/修改魔数的宽松模式校验
+            var endianTag = dexptr.add(40).readU32();
+            var headerSize = dexptr.add(36).readU32();
+            if (endianTag === 0x12345678 && (headerSize === 0x70 || headerSize === 0x28)) {
+                return true;
+            }
         } catch (e) {
             return false;
         }
@@ -120,6 +135,26 @@ function searchDex(deepSearch) {
             // 特征码直接缩短为 4 字节 "64 65 78 0a" (dex\n)，100% 抓出所有版本号混淆 DEX！
             // 彻底移除任何 range.file.path 路径限制，进行全内存段穿透扫描！
             Memory.scanSync(range.base, range.size, '64 65 78 0a').forEach(function(match) {
+                if (verify(match.address, range, false)) {
+                    var dex_size = get_dex_real_size(match.address, range.base, range.base.add(range.size));
+                    result.push({
+                        'addr': match.address,
+                        'size': dex_size,
+                        'source': 'BruteForceScan'
+                    });
+                    var max_size = range.size - match.address.sub(range.base).toInt32();
+                    if (deepSearch && max_size != dex_size) {
+                        result.push({
+                            'addr': match.address,
+                            'size': max_size,
+                            'source': 'BruteForceScanDeep'
+                        });
+                    }
+                }
+            });
+
+            // 增加对 Compact DEX (cdex) 特征码 "63 64 65 78" ('cdex') 的扫描
+            Memory.scanSync(range.base, range.size, '63 64 65 78').forEach(function(match) {
                 if (verify(match.address, range, false)) {
                     var dex_size = get_dex_real_size(match.address, range.base, range.base.add(range.size));
                     result.push({

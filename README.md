@@ -14,10 +14,10 @@ Python 3.14.5
 
 ```bash
 # 列出目标设备中当前进程加载的所有 SO 模块
-python dump_so.py
+python3 dump_so.py
 
 # 转储并自动重构指定的 SO 模块（例如 libc.so）
-python dump_so.py libc.so
+python3 dump_so.py libc.so
 ```
 
 ***
@@ -30,7 +30,7 @@ python dump_so.py libc.so
 
 ```bash
 # 确保目标 App 在运行，然后直接执行脚本
-python dump_dex_by_dexCache.py
+python3 dump_dex_by_dexCache.py
 ```
 
 *本地拉取成果将保存在自动创建的* *`dumped_dexs_<packageName>_<timestamp>_byDexCache/`* *目录下。*
@@ -45,7 +45,7 @@ python dump_dex_by_dexCache.py
 
 ```bash
 # 确保目标 App 在运行，然后直接执行脚本
-python dump_dex_by_bruteForceScanMemory.py
+python3 dump_dex_by_bruteForceScanMemory.py
 ```
 
 *本地拉取成果将保存在自动创建的* *`dumped_dexs_<packageName>_<timestamp>_byBruteForceScanMemory/`* *目录下。*

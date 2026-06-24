@@ -10,6 +10,7 @@ DEX 差异对比工具 (DEX Class Comparator)
 import os
 import sys
 import struct
+import re
 
 def read_uleb128(data, offset):
     """
@@ -472,6 +473,10 @@ def main():
         # 3. 有差异类的类名按长度从长到短排序打印
         only_in_a_list = res["only_in_a"]
         only_in_b_list = res["only_in_b"]
+
+        # 过滤删除所有非顶级类 (包含 $ 符号的类，包括所有匿名类、Lambda 合成类和内部类)
+        only_in_a_list = [cls for cls in only_in_a_list if '$' not in cls]
+        only_in_b_list = [cls for cls in only_in_b_list if '$' not in cls]
 
         print("\n🔍 [ 3. 差异类名列表明细 (按类名从长到短排序) ]")
 

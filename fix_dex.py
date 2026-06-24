@@ -865,6 +865,9 @@ def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
         data = data[:header_sz]
         file_size = header_sz
 
+    # 3.5 更新内存数据中的 file_size 声明（以便后续比较和重算签名）
+    struct.pack_into("<I", data, 32, file_size)
+
     # 4. 判断是否需要写回或修复 Adler32/SHA1
     # 如果 data 与原文件相同且 file_size == header_sz 且不是强制，则直接返回
     try:
@@ -887,9 +890,6 @@ def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
         print(f"[*] 正在修复魔数擦除版 DEX/CDEX 文件: {filename} (大小: {file_size} 字节)")
     else:
         print(f"[*] 正在修复标准 DEX 文件: {filename} (大小: {file_size} 字节)")
-
-    # 更新 file_size
-    struct.pack_into("<I", data, 32, file_size)
 
     # 重新计算并更新 SHA-1 签名
     sha1 = hashlib.sha1()

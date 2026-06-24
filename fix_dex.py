@@ -170,6 +170,607 @@ def convert_cdex_on_device(data, filename, adb_device):
 
     return True, converted_data
 
+def read_uleb128(data, off):
+    if off >= len(data):
+        raise IndexError("Offset out of bounds for ULEB128")
+    result = 0
+    shift = 0
+    while True:
+        if off >= len(data):
+            raise IndexError("Offset out of bounds in ULEB128 loop")
+        byte = data[off]
+        off += 1
+        result |= (byte & 0x7f) << shift
+        if (byte & 0x80) == 0:
+            break
+        shift += 7
+    return result, off
+
+def read_sleb128(data, off):
+    if off >= len(data):
+        raise IndexError("Offset out of bounds for SLEB128")
+    result = 0
+    shift = 0
+    while True:
+        if off >= len(data):
+            raise IndexError("Offset out of bounds in SLEB128 loop")
+        byte = data[off]
+        off += 1
+        result |= (byte & 0x7f) << shift
+        shift += 7
+        if (byte & 0x80) == 0:
+            break
+    if (shift < 32) and (byte & 0x40):
+        result |= -(1 << shift)
+    return result, off
+
+def get_class_data_item_size(data, off):
+    start_off = off
+    static_fields_size, off = read_uleb128(data, off)
+    instance_fields_size, off = read_uleb128(data, off)
+    direct_methods_size, off = read_uleb128(data, off)
+    virtual_methods_size, off = read_uleb128(data, off)
+    for _ in range(static_fields_size):
+        _, off = read_uleb128(data, off) # field_idx_diff
+        _, off = read_uleb128(data, off) # access_flags
+    for _ in range(instance_fields_size):
+        _, off = read_uleb128(data, off) # field_idx_diff
+        _, off = read_uleb128(data, off) # access_flags
+    for _ in range(direct_methods_size):
+        _, off = read_uleb128(data, off) # method_idx_diff
+        _, off = read_uleb128(data, off) # access_flags
+        _, off = read_uleb128(data, off) # code_off
+    for _ in range(virtual_methods_size):
+        _, off = read_uleb128(data, off) # method_idx_diff
+        _, off = read_uleb128(data, off) # access_flags
+        _, off = read_uleb128(data, off) # code_off
+    return off - start_off
+
+def get_code_item_size(data, off):
+    start_off = off
+    if off + 16 > len(data):
+        raise IndexError("Offset out of bounds for code_item header")
+    registers_size, ins_size, outs_size, tries_size, debug_info_off, insns_size = struct.unpack('<HHHHII', data[off:off+16])
+    off += 16
+
+    if registers_size > 65535 or ins_size > 65535 or outs_size > 65535:
+        raise ValueError("Unreasonable register/ins/outs size in code_item")
+
+    if off + insns_size * 2 > len(data):
+        raise IndexError("insns_size goes out of bounds")
+    off += insns_size * 2
+    if tries_size > 0:
+        if (insns_size % 2) != 0:
+            off += 2 # padding
+        if off + tries_size * 8 > len(data):
+            raise IndexError("tries_size goes out of bounds")
+        off += tries_size * 8 # tries
+        size, off = read_uleb128(data, off) # handlers size
+        if size > 65535:
+            raise ValueError("Unreasonable catch handler list size")
+        for _ in range(size):
+            h_size, off = read_sleb128(data, off)
+            abs_h_size = abs(h_size)
+            if abs_h_size > 65535:
+                raise ValueError("Unreasonable single catch handler size")
+            for _ in range(abs_h_size):
+                _, off = read_uleb128(data, off) # type_idx
+                _, off = read_uleb128(data, off) # addr
+            if h_size <= 0:
+                _, off = read_uleb128(data, off) # catch_all_addr
+    return off - start_off
+
+def get_string_data_item_size(data, off):
+    start_off = off
+    utf16_size, off = read_uleb128(data, off)
+    while True:
+        if off >= len(data):
+            raise IndexError("Unterminated string data item")
+        if data[off] == 0x00:
+            break
+        off += 1
+    off += 1 # null terminator
+    return off - start_off
+
+def get_debug_info_item_size(data, off):
+    start_off = off
+    line_start, off = read_uleb128(data, off)
+    parameters_size, off = read_uleb128(data, off)
+    for _ in range(parameters_size):
+        _, off = read_uleb128(data, off)
+    while True:
+        if off >= len(data):
+            raise IndexError("Unterminated debug info item")
+        opcode = data[off]
+        off += 1
+        if opcode == 0x00: # DBG_END_SEQUENCE
+            break
+        elif opcode == 0x01: # DBG_ADVANCE_PC
+            _, off = read_uleb128(data, off)
+        elif opcode == 0x02: # DBG_ADVANCE_LINE
+            _, off = read_sleb128(data, off)
+        elif opcode == 0x03: # DBG_START_LOCAL
+            _, off = read_uleb128(data, off) # register_num
+            _, off = read_uleb128(data, off) # name_idx
+            _, off = read_uleb128(data, off) # type_idx
+        elif opcode == 0x04: # DBG_START_LOCAL_EXTENDED
+            _, off = read_uleb128(data, off) # register_num
+            _, off = read_uleb128(data, off) # name_idx
+            _, off = read_uleb128(data, off) # type_idx
+            _, off = read_uleb128(data, off) # sig_idx
+        elif opcode == 0x05: # DBG_END_LOCAL
+            _, off = read_uleb128(data, off) # register_num
+        elif opcode == 0x06: # DBG_RESTART_LOCAL
+            _, off = read_uleb128(data, off) # register_num
+        elif opcode == 0x09: # DBG_SET_FILE
+            _, off = read_uleb128(data, off) # name_idx
+    return off - start_off
+
+def skip_encoded_value(data, off):
+    if off >= len(data):
+        raise IndexError("Offset out of bounds for encoded_value")
+    byte = data[off]
+    off += 1
+    value_type = byte & 0x1f
+    value_arg = byte >> 5
+    if value_type in [0x00, 0x02, 0x03, 0x04, 0x06, 0x10, 0x11, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b]:
+        off += (value_arg + 1)
+    elif value_type == 0x1c: # array
+        off = skip_encoded_array(data, off)
+    elif value_type == 0x1d: # annotation
+        off = skip_encoded_annotation(data, off)
+    return off
+
+def skip_encoded_array(data, off):
+    size, off = read_uleb128(data, off)
+    for _ in range(size):
+        off = skip_encoded_value(data, off)
+    return off
+
+def skip_encoded_annotation(data, off):
+    type_idx, off = read_uleb128(data, off)
+    size, off = read_uleb128(data, off)
+    for _ in range(size):
+        name_idx, off = read_uleb128(data, off)
+        off = skip_encoded_value(data, off)
+    return off
+
+def get_annotation_item_size(data, off):
+    start_off = off
+    if off >= len(data):
+        raise IndexError("Offset out of bounds for annotation item visibility")
+    visibility = data[off]
+    off += 1
+    off = skip_encoded_annotation(data, off)
+    return off - start_off
+
+def get_encoded_array_item_size(data, off):
+    start_off = off
+    off = skip_encoded_array(data, off)
+    return off - start_off
+
+def get_annotations_directory_item_size(data, off):
+    if off + 16 > len(data):
+        raise IndexError("Offset out of bounds for annotations_directory_item header")
+    class_annotations_off, fields_size, methods_size, parameters_size = struct.unpack('<IIII', data[off:off+16])
+    return 16 + 8 * (fields_size + methods_size + parameters_size)
+
+def calculate_dex_map_size(data):
+    if len(data) < 112:
+        return len(data)
+
+    # 自动识别 magic
+    magic = data[0:4]
+    is_standard_dex = (magic == b'dex\n')
+    is_compact_dex = (magic == b'cdex')
+    is_erased_magic = False
+
+    if not is_standard_dex and not is_compact_dex:
+        # Check if erased
+        if len(data) >= 44:
+            endian_tag = struct.unpack("<I", data[40:44])[0]
+            header_sz_check = struct.unpack("<I", data[36:40])[0]
+            if endian_tag == 0x12345678 and (header_sz_check == 0x70 or header_sz_check == 0x28):
+                is_erased_magic = True
+            else:
+                return len(data)
+        else:
+            return len(data)
+
+    map_off = struct.unpack('<I', data[52:56])[0]
+    if map_off >= len(data) or map_off < 40:
+        return len(data)
+
+    try:
+        map_size = struct.unpack('<I', data[map_off:map_off+4])[0]
+        if map_size == 0 or map_size > 100:
+            return len(data)
+    except Exception:
+        return len(data)
+
+    max_offset = 0
+    try:
+        for i in range(map_size):
+            item_offset = map_off + 4 + i * 12
+            if item_offset + 12 > len(data):
+                break
+            type_val, unused, item_size, item_off = struct.unpack('<HHII', data[item_offset:item_offset+12])
+            if item_off >= len(data):
+                continue
+
+            section_size = 0
+            if type_val == 0x0000: # Header
+                section_size = item_size * 112
+            elif type_val == 0x0001: # StringId
+                section_size = item_size * 4
+            elif type_val == 0x0002: # TypeId
+                section_size = item_size * 4
+            elif type_val == 0x0003: # ProtoId
+                section_size = item_size * 12
+            elif type_val == 0x0004: # FieldId
+                section_size = item_size * 8
+            elif type_val == 0x0005: # MethodId
+                section_size = item_size * 8
+            elif type_val == 0x0006: # ClassDef
+                section_size = item_size * 32
+            elif type_val == 0x0007: # CallSiteId
+                section_size = item_size * 4
+            elif type_val == 0x0008: # MethodHandle
+                section_size = item_size * 8
+            elif type_val == 0x1000: # MapList
+                section_size = 4 + item_size * 12
+            elif type_val == 0x1001: # TypeList
+                curr_off = item_off
+                for _ in range(item_size):
+                    if curr_off + 4 <= len(data):
+                        t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
+                        curr_off += 4 + t_size * 2
+                section_size = curr_off - item_off
+            elif type_val == 0x1002: # AnnotationSetRefList
+                curr_off = item_off
+                for _ in range(item_size):
+                    if curr_off + 4 <= len(data):
+                        t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
+                        curr_off += 4 + t_size * 4
+                section_size = curr_off - item_off
+            elif type_val == 0x1003: # AnnotationSetItem
+                curr_off = item_off
+                for _ in range(item_size):
+                    if curr_off + 4 <= len(data):
+                        t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
+                        curr_off += 4 + t_size * 4
+                section_size = curr_off - item_off
+            elif type_val == 0x2000: # ClassData
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_class_data_item_size(data, curr_off)
+                section_size = curr_off - item_off
+            elif type_val == 0x2001: # CodeItem
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_code_item_size(data, curr_off)
+                section_size = curr_off - item_off
+            elif type_val == 0x2002: # StringData
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_string_data_item_size(data, curr_off)
+                section_size = curr_off - item_off
+            elif type_val == 0x2003: # DebugInfo
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_debug_info_item_size(data, curr_off)
+                section_size = curr_off - item_off
+            elif type_val == 0x2004: # AnnotationItem
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_annotation_item_size(data, curr_off)
+                section_size = curr_off - item_off
+            elif type_val == 0x2005: # EncodedArray
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_encoded_array_item_size(data, curr_off)
+                section_size = curr_off - item_off
+            elif type_val == 0x2006: # AnnotationsDirectory
+                curr_off = item_off
+                for _ in range(item_size):
+                    curr_off += get_annotations_directory_item_size(data, curr_off)
+                section_size = curr_off - item_off
+
+            end_offset = item_off + section_size
+            if end_offset > max_offset:
+                max_offset = end_offset
+    except Exception:
+        pass
+
+    if max_offset > 0 and max_offset <= len(data):
+        return max_offset
+    return len(data)
+
+def calculate_dex_graph_size(data):
+    if len(data) < 112:
+        return len(data)
+
+    # 1. Read header fields
+    magic = data[0:4]
+    is_standard_dex = (magic == b'dex\n')
+    is_compact_dex = (magic == b'cdex')
+    is_erased_magic = False
+
+    if not is_standard_dex and not is_compact_dex:
+        # Check if erased
+        if len(data) >= 44:
+            endian_tag = struct.unpack("<I", data[40:44])[0]
+            header_sz_check = struct.unpack("<I", data[36:40])[0]
+            if endian_tag == 0x12345678 and (header_sz_check == 0x70 or header_sz_check == 0x28):
+                is_erased_magic = True
+            else:
+                return len(data)
+        else:
+            return len(data)
+
+    # We only perform graph traversal for Standard DEX (and erased magic DEX)
+    if is_compact_dex:
+        return len(data)
+
+    try:
+        string_ids_size = struct.unpack('<I', data[56:60])[0]
+        string_ids_off = struct.unpack('<I', data[60:64])[0]
+        proto_ids_size = struct.unpack('<I', data[72:76])[0]
+        proto_ids_off = struct.unpack('<I', data[76:80])[0]
+        class_defs_size = struct.unpack('<I', data[96:100])[0]
+        class_defs_off = struct.unpack('<I', data[100:104])[0]
+        map_off = struct.unpack('<I', data[52:56])[0]
+    except Exception:
+        return len(data)
+
+    max_offset = 0
+    visited = set()
+
+    def update_max(end_off):
+        nonlocal max_offset
+        if end_off > max_offset and end_off <= len(data):
+            max_offset = end_off
+
+    try:
+        # 1. Map List
+        if map_off > 0 and map_off + 4 <= len(data):
+            map_size = struct.unpack('<I', data[map_off:map_off+4])[0]
+            if map_size < 100:
+                update_max(map_off + 4 + map_size * 12)
+
+        # 2. String IDs -> String Data Items
+        if string_ids_off > 0:
+            for i in range(string_ids_size):
+                off = string_ids_off + i * 4
+                if off + 4 > len(data):
+                    break
+                str_off = struct.unpack('<I', data[off:off+4])[0]
+                if str_off > 0 and str_off < len(data):
+                    try:
+                        sz = get_string_data_item_size(data, str_off)
+                        update_max(str_off + sz)
+                    except Exception:
+                        pass
+
+        # 3. Proto IDs -> Type Lists
+        if proto_ids_off > 0:
+            for i in range(proto_ids_size):
+                off = proto_ids_off + i * 12
+                if off + 12 > len(data):
+                    break
+                parameters_off = struct.unpack('<I', data[off+8 : off+12])[0]
+                if parameters_off > 0 and parameters_off < len(data) and parameters_off not in visited:
+                    visited.add(parameters_off)
+                    try:
+                        t_size = struct.unpack('<I', data[parameters_off:parameters_off+4])[0]
+                        if t_size < 65536:
+                            update_max(parameters_off + 4 + t_size * 2)
+                    except Exception:
+                        pass
+
+        # Queues/Sets for recursive traversal of other items
+        annotations_dir_offsets = set()
+        class_data_offsets = set()
+        encoded_array_offsets = set()
+
+        # 4. Class Defs
+        if class_defs_off > 0:
+            for i in range(class_defs_size):
+                off = class_defs_off + i * 32
+                if off + 32 > len(data):
+                    break
+                class_idx, access_flags, superclass_idx, interfaces_off, source_file_idx, annotations_off, class_data_off, static_values_off = struct.unpack('<IIIIIIII', data[off:off+32])
+
+                # interfaces_off (type_list)
+                if interfaces_off > 0 and interfaces_off < len(data) and interfaces_off not in visited:
+                    visited.add(interfaces_off)
+                    try:
+                        t_size = struct.unpack('<I', data[interfaces_off:interfaces_off+4])[0]
+                        if t_size < 65536:
+                            update_max(interfaces_off + 4 + t_size * 2)
+                    except Exception:
+                        pass
+
+                # annotations_off (annotations_directory_item)
+                if annotations_off > 0 and annotations_off < len(data):
+                    annotations_dir_offsets.add(annotations_off)
+
+                # class_data_off (class_data_item)
+                if class_data_off > 0 and class_data_off < len(data):
+                    class_data_offsets.add(class_data_off)
+
+                # static_values_off (encoded_array_item)
+                if static_values_off > 0 and static_values_off < len(data):
+                    encoded_array_offsets.add(static_values_off)
+
+        # Sets to collect nested offset targets
+        annotation_set_ref_lists = set()
+        annotation_sets = set()
+        annotation_items = set()
+        code_items = set()
+
+        # 5. Parse Annotations Directories
+        for ann_dir_off in annotations_dir_offsets:
+            if ann_dir_off in visited or ann_dir_off + 16 > len(data):
+                continue
+            visited.add(ann_dir_off)
+            try:
+                class_annotations_off, fields_size, methods_size, parameters_size = struct.unpack('<IIII', data[ann_dir_off:ann_dir_off+16])
+                sz = 16 + 8 * (fields_size + methods_size + parameters_size)
+                update_max(ann_dir_off + sz)
+
+                if class_annotations_off > 0 and class_annotations_off < len(data):
+                    annotation_sets.add(class_annotations_off)
+
+                # Parse field/method/parameter lists
+                curr = ann_dir_off + 16
+                # fields
+                for _ in range(fields_size):
+                    if curr + 8 <= len(data):
+                        f_idx, a_off = struct.unpack('<II', data[curr:curr+8])
+                        if a_off > 0 and a_off < len(data):
+                            annotation_sets.add(a_off)
+                        curr += 8
+                # methods
+                for _ in range(methods_size):
+                    if curr + 8 <= len(data):
+                        m_idx, a_off = struct.unpack('<II', data[curr:curr+8])
+                        if a_off > 0 and a_off < len(data):
+                            annotation_sets.add(a_off)
+                        curr += 8
+                # parameters
+                for _ in range(parameters_size):
+                    if curr + 8 <= len(data):
+                        m_idx, r_off = struct.unpack('<II', data[curr:curr+8])
+                        if r_off > 0 and r_off < len(data):
+                            annotation_set_ref_lists.add(r_off)
+                        curr += 8
+            except Exception:
+                pass
+
+        # 6. Parse Annotation Set Ref Lists
+        for ref_list_off in annotation_set_ref_lists:
+            if ref_list_off in visited or ref_list_off + 4 > len(data):
+                continue
+            visited.add(ref_list_off)
+            try:
+                size = struct.unpack('<I', data[ref_list_off:ref_list_off+4])[0]
+                if size < 65536:
+                    update_max(ref_list_off + 4 + size * 4)
+                    for j in range(size):
+                        off = ref_list_off + 4 + j * 4
+                        if off + 4 <= len(data):
+                            a_off = struct.unpack('<I', data[off:off+4])[0]
+                            if a_off > 0 and a_off < len(data):
+                                annotation_sets.add(a_off)
+            except Exception:
+                pass
+
+        # 7. Parse Annotation Sets
+        for ann_set_off in annotation_sets:
+            if ann_set_off in visited or ann_set_off + 4 > len(data):
+                continue
+            visited.add(ann_set_off)
+            try:
+                size = struct.unpack('<I', data[ann_set_off:ann_set_off+4])[0]
+                if size < 65536:
+                    update_max(ann_set_off + 4 + size * 4)
+                    for j in range(size):
+                        off = ann_set_off + 4 + j * 4
+                        if off + 4 <= len(data):
+                            a_off = struct.unpack('<I', data[off:off+4])[0]
+                            if a_off > 0 and a_off < len(data):
+                                annotation_items.add(a_off)
+            except Exception:
+                pass
+
+        # 8. Parse Annotation Items
+        for ann_item_off in annotation_items:
+            if ann_item_off in visited or ann_item_off >= len(data):
+                continue
+            visited.add(ann_item_off)
+            try:
+                sz = get_annotation_item_size(data, ann_item_off)
+                update_max(ann_item_off + sz)
+            except Exception:
+                pass
+
+        # 9. Parse Class Data Items -> Code Items
+        for cd_off in class_data_offsets:
+            if cd_off in visited or cd_off >= len(data):
+                continue
+            visited.add(cd_off)
+            try:
+                start_off = cd_off
+                static_fields_size, cd_off = read_uleb128(data, cd_off)
+                instance_fields_size, cd_off = read_uleb128(data, cd_off)
+                direct_methods_size, cd_off = read_uleb128(data, cd_off)
+                virtual_methods_size, cd_off = read_uleb128(data, cd_off)
+                for _ in range(static_fields_size):
+                    _, cd_off = read_uleb128(data, cd_off)
+                    _, cd_off = read_uleb128(data, cd_off)
+                for _ in range(instance_fields_size):
+                    _, cd_off = read_uleb128(data, cd_off)
+                    _, cd_off = read_uleb128(data, cd_off)
+                for _ in range(direct_methods_size):
+                    _, cd_off = read_uleb128(data, cd_off)
+                    _, cd_off = read_uleb128(data, cd_off)
+                    code_off, cd_off = read_uleb128(data, cd_off)
+                    if code_off > 0 and code_off < len(data):
+                        code_items.add(code_off)
+                for _ in range(virtual_methods_size):
+                    _, cd_off = read_uleb128(data, cd_off)
+                    _, cd_off = read_uleb128(data, cd_off)
+                    code_off, cd_off = read_uleb128(data, cd_off)
+                    if code_off > 0 and code_off < len(data):
+                        code_items.add(code_off)
+                update_max(cd_off)
+            except Exception:
+                pass
+
+        # 10. Parse Encoded Array Items
+        for ea_off in encoded_array_offsets:
+            if ea_off in visited or ea_off >= len(data):
+                continue
+            visited.add(ea_off)
+            try:
+                sz = get_encoded_array_item_size(data, ea_off)
+                update_max(ea_off + sz)
+            except Exception:
+                pass
+
+        # 11. Parse Code Items -> Debug Info Items
+        for code_off in code_items:
+            if code_off in visited or code_off + 16 > len(data):
+                continue
+            visited.add(code_off)
+            try:
+                sz = get_code_item_size(data, code_off)
+                update_max(code_off + sz)
+
+                debug_info_off = struct.unpack('<I', data[code_off+8 : code_off+12])[0]
+                if debug_info_off > 0 and debug_info_off < len(data) and debug_info_off not in visited:
+                    visited.add(debug_info_off)
+                    try:
+                        d_sz = get_debug_info_item_size(data, debug_info_off)
+                        update_max(debug_info_off + d_sz)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+    if max_offset > 0 and max_offset <= len(data):
+        return max_offset
+    return len(data)
+
+def calculate_dex_true_size(data):
+    map_sz = calculate_dex_map_size(data)
+    graph_sz = calculate_dex_graph_size(data)
+    return max(map_sz, graph_sz)
+
 def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
     """
     检查、修复并智能转译单个 DEX/CDEX 文件。
@@ -252,9 +853,15 @@ def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
     # 2. 读取文件头中声明的文件大小 (偏移量 32-35)
     header_sz = struct.unpack("<I", data[32:36])[0]
 
-    # 3. 智能尾部填充字节裁剪（防范 Frida 内存 Dump 大段映射扩充带来的尾部无用填充）
+    # 2.5 智能计算真实物理大小（对抗 forged/wrong header_sz）
+    true_sz = calculate_dex_true_size(data)
+    if true_sz > 40 and true_sz != header_sz:
+        print(f"[*] {filename}: 声明大小: {header_sz} | 计算真实大小: {true_sz}. 将自动修正为真实大小并进行精准裁剪。")
+        header_sz = true_sz
+
+    # 3. 智能尾部填充字节裁剪（防范 Frida 内存 Dump 大段映射扩充及多DEX合并带来的尾部冗余）
     if file_size > header_sz and header_sz > 40:
-        print(f"[*] {filename}: 检测到尾部内存填充，正在自动裁剪多余字节 (实际大小 {file_size} -> 声明大小 {header_sz})...")
+        print(f"[*] {filename}: 正在裁剪尾部多余字节 (实际大小 {file_size} -> 真实大小 {header_sz})...")
         data = data[:header_sz]
         file_size = header_sz
 

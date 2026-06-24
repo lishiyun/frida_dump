@@ -3,3 +3,5 @@ __pycache__/
 dumped_dexs_*/
 *.txt
 by*/
+*.so
+*.un~

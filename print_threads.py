@@ -265,12 +265,50 @@ def print_process_tree(node, prefix="", is_last=True, is_root=True):
         is_last_child = (j == len(children) - 1)
         print_process_tree(child_node, prefix=child_prefix, is_last=is_last_child, is_root=False)
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法: python3 print_threads.py <PID_or_PACKAGE_NAME>")
-        sys.exit(1)
+def get_frontmost_package():
+    # 使用 dumpsys activity 获取当前最前台包名
+    try:
+        cmd = ["adb", "shell", "dumpsys activity activities 2>/dev/null"]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # 匹配类似 "mResumedActivity: ActivityRecord{... u0 com.xxx/...}"
+        match = re.search(r'mResumedActivity:.*?\s([a-zA-Z0-9_\.]+)/', res.stdout)
+        if match:
+            return match.group(1).strip()
+    except Exception:
+        pass
 
-    target = sys.argv[1]
+    # 如果 dumpsys activity 失败，尝试 dumpsys window 的 mCurrentFocus
+    try:
+        cmd = ["adb", "shell", "dumpsys window 2>/dev/null"]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        match = re.search(r'mCurrentFocus=.*?([a-zA-Z0-9_\.]+)/', res.stdout)
+        if match:
+            return match.group(1).strip()
+    except Exception:
+        pass
+
+    return None
+
+
+if __name__ == "__main__":
+    target = None
+    if len(sys.argv) >= 2:
+        target = sys.argv[1]
+    else:
+        print("[*] 未提供参数，正在自动检测最前台应用...")
+        target = get_frontmost_package()
+        if not target:
+            print("[-] 错误: 无法获取前台应用，请确认设备已连接且非锁屏。或者您可以手动传入 PID 或包名：")
+            print("    用法: python3 print_threads.py <PID_or_PACKAGE_NAME>")
+            sys.exit(1)
+        # 排除 launcher 这种无意义的前台应用，如果是 launcher，提示用户开启目标应用
+        if "launcher" in target.lower() or "systemui" in target.lower():
+            print(f"[-] 警告: 检测到当前前台应用为系统界面/桌面启动器 ({target})。")
+            print("    请在手机上打开需要分析的 App 到前台，或手动传入 PID 或包名。")
+            sys.exit(1)
+
+        print(f"[+] 自动探测到最前台应用: {target}")
+
     pids_to_process = []
 
     # 支持传入包名自动解析全部 PID（使用 ps -A 模糊过滤，确保不错过 :push 和 :tools 等子进程）

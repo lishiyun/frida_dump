@@ -166,11 +166,48 @@ if __name__ == "__main__":
 
     if origin_so_name is None:
         allmodule = script.exports.allmodule()
-        for module in allmodule:
-            print(module["name"])
+
+        def get_module_priority_score(module):
+            path = module.get("path", "")
+            name = module.get("name", "")
+            if "/data/app/" in path:
+                return 0
+            is_system_path = any(sys_dir in path for sys_dir in ["/system/", "/apex/", "/vendor/", "/odm/", "/product/"])
+            if not is_system_path:
+                return 1
+            if "/vendor/" in path or "/odm/" in path:
+                return 2
+            if "/system/" in path:
+                if "linker" in name or "linker" in path:
+                    return 5
+                return 3
+            if "/apex/" in path:
+                return 4
+            return 10
+
+        allmodule.sort(key=get_module_priority_score)
+
+        # 统计模块信息
+        total_count = len(allmodule)
+        third_party_count = sum(1 for m in allmodule if "/data/app/" in m.get("path", ""))
+
+        print("")
+        for i, module in enumerate(allmodule):
+            print(f"[{i:3d}] {module['path']}")
+
+        print(f"\n[+] 总结: 进程中共发现 {total_count} 个 SO 模块，其中有 {third_party_count} 个属于第三方独有模块。")
     else:
         module_info = script.exports.findmodule(origin_so_name)
-        print(module_info)
+        if not module_info:
+            print(f"[-] 在进程中未找到模块: {origin_so_name}")
+            sys.exit(1)
+
+        print("\n[+] 模块信息:")
+        print(f"    名称: {module_info['name']}")
+        print(f"    基址: {module_info['base']}")
+        print(f"    大小: {module_info['size']} 字节")
+        print(f"    手机上原SO绝对路径: {module_info['path']}")
+
         base = module_info["base"]
         size = module_info["size"]
         module_buffer = script.exports.dumpmodule(origin_so_name)
@@ -182,7 +219,8 @@ if __name__ == "__main__":
                 arch = script.exports.arch()
                 fix_so_name = fix_so(arch, origin_so_name, dump_so_name, base, size)
 
-                print(fix_so_name)
+                abs_fix_path = os.path.abspath(fix_so_name)
+                print(f"\n[+] 修复后的SO本地绝对路径: {abs_fix_path}")
                 os.remove(dump_so_name)
 
 

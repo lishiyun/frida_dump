@@ -6,9 +6,12 @@ import struct
 import subprocess
 import zipfile
 
-def run_cmd(cmd):
-    result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return result.returncode, result.stdout.decode('utf-8', errors='ignore'), result.stderr.decode('utf-8', errors='ignore')
+def run_cmd(cmd, timeout=5):
+    try:
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        return result.returncode, result.stdout.decode('utf-8', errors='ignore'), result.stderr.decode('utf-8', errors='ignore')
+    except subprocess.TimeoutExpired:
+        return -1, "", f"TimeoutExpired after {timeout} seconds"
 
 def get_online_adb_device():
     """
@@ -175,7 +178,11 @@ def read_uleb128(data, off):
         raise IndexError("Offset out of bounds for ULEB128")
     result = 0
     shift = 0
+    loop_count = 0
     while True:
+        loop_count += 1
+        if loop_count > 10:
+            raise ValueError("Too many iterations in read_uleb128 (corrupted data)")
         if off >= len(data):
             raise IndexError("Offset out of bounds in ULEB128 loop")
         byte = data[off]
@@ -191,7 +198,11 @@ def read_sleb128(data, off):
         raise IndexError("Offset out of bounds for SLEB128")
     result = 0
     shift = 0
+    loop_count = 0
     while True:
+        loop_count += 1
+        if loop_count > 10:
+            raise ValueError("Too many iterations in read_sleb128 (corrupted data)")
         if off >= len(data):
             raise IndexError("Offset out of bounds in SLEB128 loop")
         byte = data[off]
@@ -421,59 +432,92 @@ def calculate_dex_map_size(data):
                 section_size = 4 + item_size * 12
             elif type_val == 0x1001: # TypeList
                 curr_off = item_off
-                for _ in range(item_size):
-                    if curr_off + 4 <= len(data):
-                        t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
-                        curr_off += 4 + t_size * 2
+                for _ in range(min(item_size, 100000)):
+                    if curr_off + 4 > len(data):
+                        break
+                    last_off = curr_off
+                    t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
+                    curr_off += 4 + min(t_size, 10000) * 2
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x1002: # AnnotationSetRefList
                 curr_off = item_off
-                for _ in range(item_size):
-                    if curr_off + 4 <= len(data):
-                        t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
-                        curr_off += 4 + t_size * 4
+                for _ in range(min(item_size, 100000)):
+                    if curr_off + 4 > len(data):
+                        break
+                    last_off = curr_off
+                    t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
+                    curr_off += 4 + min(t_size, 10000) * 4
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x1003: # AnnotationSetItem
                 curr_off = item_off
-                for _ in range(item_size):
-                    if curr_off + 4 <= len(data):
-                        t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
-                        curr_off += 4 + t_size * 4
+                for _ in range(min(item_size, 100000)):
+                    if curr_off + 4 > len(data):
+                        break
+                    last_off = curr_off
+                    t_size = struct.unpack('<I', data[curr_off:curr_off+4])[0]
+                    curr_off += 4 + min(t_size, 10000) * 4
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2000: # ClassData
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_class_data_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2001: # CodeItem
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_code_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2002: # StringData
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_string_data_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2003: # DebugInfo
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_debug_info_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2004: # AnnotationItem
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_annotation_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2005: # EncodedArray
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_encoded_array_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
             elif type_val == 0x2006: # AnnotationsDirectory
                 curr_off = item_off
-                for _ in range(item_size):
+                for _ in range(min(item_size, 100000)):
+                    last_off = curr_off
                     curr_off += get_annotations_directory_item_size(data, curr_off)
+                    if curr_off <= last_off:
+                        break
                 section_size = curr_off - item_off
 
             end_offset = item_off + section_size
@@ -540,7 +584,7 @@ def calculate_dex_graph_size(data):
 
         # 2. String IDs -> String Data Items
         if string_ids_off > 0:
-            for i in range(string_ids_size):
+            for i in range(min(string_ids_size, 100000)):
                 off = string_ids_off + i * 4
                 if off + 4 > len(data):
                     break
@@ -554,7 +598,7 @@ def calculate_dex_graph_size(data):
 
         # 3. Proto IDs -> Type Lists
         if proto_ids_off > 0:
-            for i in range(proto_ids_size):
+            for i in range(min(proto_ids_size, 50000)):
                 off = proto_ids_off + i * 12
                 if off + 12 > len(data):
                     break
@@ -575,7 +619,7 @@ def calculate_dex_graph_size(data):
 
         # 4. Class Defs
         if class_defs_off > 0:
-            for i in range(class_defs_size):
+            for i in range(min(class_defs_size, 50000)):
                 off = class_defs_off + i * 32
                 if off + 32 > len(data):
                     break
@@ -610,12 +654,17 @@ def calculate_dex_graph_size(data):
         code_items = set()
 
         # 5. Parse Annotations Directories
-        for ann_dir_off in annotations_dir_offsets:
+        for i_idx, ann_dir_off in enumerate(annotations_dir_offsets):
+            if i_idx > 50000:
+                break
             if ann_dir_off in visited or ann_dir_off + 16 > len(data):
                 continue
             visited.add(ann_dir_off)
             try:
                 class_annotations_off, fields_size, methods_size, parameters_size = struct.unpack('<IIII', data[ann_dir_off:ann_dir_off+16])
+                # Unreasonable value validation to prevent forged headers/bogus annotations directories
+                if fields_size > 65535 or methods_size > 65535 or parameters_size > 65535:
+                    continue
                 sz = 16 + 8 * (fields_size + methods_size + parameters_size)
                 update_max(ann_dir_off + sz)
 
@@ -625,31 +674,36 @@ def calculate_dex_graph_size(data):
                 # Parse field/method/parameter lists
                 curr = ann_dir_off + 16
                 # fields
-                for _ in range(fields_size):
-                    if curr + 8 <= len(data):
-                        f_idx, a_off = struct.unpack('<II', data[curr:curr+8])
-                        if a_off > 0 and a_off < len(data):
-                            annotation_sets.add(a_off)
-                        curr += 8
+                for _ in range(min(fields_size, 10000)):
+                    if curr + 8 > len(data):
+                        break
+                    f_idx, a_off = struct.unpack('<II', data[curr:curr+8])
+                    if a_off > 0 and a_off < len(data):
+                        annotation_sets.add(a_off)
+                    curr += 8
                 # methods
-                for _ in range(methods_size):
-                    if curr + 8 <= len(data):
-                        m_idx, a_off = struct.unpack('<II', data[curr:curr+8])
-                        if a_off > 0 and a_off < len(data):
-                            annotation_sets.add(a_off)
-                        curr += 8
+                for _ in range(min(methods_size, 10000)):
+                    if curr + 8 > len(data):
+                        break
+                    m_idx, a_off = struct.unpack('<II', data[curr:curr+8])
+                    if a_off > 0 and a_off < len(data):
+                        annotation_sets.add(a_off)
+                    curr += 8
                 # parameters
-                for _ in range(parameters_size):
-                    if curr + 8 <= len(data):
-                        m_idx, r_off = struct.unpack('<II', data[curr:curr+8])
-                        if r_off > 0 and r_off < len(data):
-                            annotation_set_ref_lists.add(r_off)
-                        curr += 8
+                for _ in range(min(parameters_size, 10000)):
+                    if curr + 8 > len(data):
+                        break
+                    m_idx, r_off = struct.unpack('<II', data[curr:curr+8])
+                    if r_off > 0 and r_off < len(data):
+                        annotation_set_ref_lists.add(r_off)
+                    curr += 8
             except Exception:
                 pass
 
         # 6. Parse Annotation Set Ref Lists
-        for ref_list_off in annotation_set_ref_lists:
+        for i_idx, ref_list_off in enumerate(annotation_set_ref_lists):
+            if i_idx > 50000:
+                break
             if ref_list_off in visited or ref_list_off + 4 > len(data):
                 continue
             visited.add(ref_list_off)
@@ -657,17 +711,20 @@ def calculate_dex_graph_size(data):
                 size = struct.unpack('<I', data[ref_list_off:ref_list_off+4])[0]
                 if size < 65536:
                     update_max(ref_list_off + 4 + size * 4)
-                    for j in range(size):
+                    for j in range(min(size, 10000)):
                         off = ref_list_off + 4 + j * 4
-                        if off + 4 <= len(data):
-                            a_off = struct.unpack('<I', data[off:off+4])[0]
-                            if a_off > 0 and a_off < len(data):
-                                annotation_sets.add(a_off)
+                        if off + 4 > len(data):
+                            break
+                        a_off = struct.unpack('<I', data[off:off+4])[0]
+                        if a_off > 0 and a_off < len(data):
+                            annotation_sets.add(a_off)
             except Exception:
                 pass
 
         # 7. Parse Annotation Sets
-        for ann_set_off in annotation_sets:
+        for i_idx, ann_set_off in enumerate(annotation_sets):
+            if i_idx > 50000:
+                break
             if ann_set_off in visited or ann_set_off + 4 > len(data):
                 continue
             visited.add(ann_set_off)
@@ -675,17 +732,20 @@ def calculate_dex_graph_size(data):
                 size = struct.unpack('<I', data[ann_set_off:ann_set_off+4])[0]
                 if size < 65536:
                     update_max(ann_set_off + 4 + size * 4)
-                    for j in range(size):
+                    for j in range(min(size, 10000)):
                         off = ann_set_off + 4 + j * 4
-                        if off + 4 <= len(data):
-                            a_off = struct.unpack('<I', data[off:off+4])[0]
-                            if a_off > 0 and a_off < len(data):
-                                annotation_items.add(a_off)
+                        if off + 4 > len(data):
+                            break
+                        a_off = struct.unpack('<I', data[off:off+4])[0]
+                        if a_off > 0 and a_off < len(data):
+                            annotation_items.add(a_off)
             except Exception:
                 pass
 
         # 8. Parse Annotation Items
-        for ann_item_off in annotation_items:
+        for i_idx, ann_item_off in enumerate(annotation_items):
+            if i_idx > 50000:
+                break
             if ann_item_off in visited or ann_item_off >= len(data):
                 continue
             visited.add(ann_item_off)
@@ -696,7 +756,9 @@ def calculate_dex_graph_size(data):
                 pass
 
         # 9. Parse Class Data Items -> Code Items
-        for cd_off in class_data_offsets:
+        for i_idx, cd_off in enumerate(class_data_offsets):
+            if i_idx > 50000:
+                break
             if cd_off in visited or cd_off >= len(data):
                 continue
             visited.add(cd_off)
@@ -706,19 +768,19 @@ def calculate_dex_graph_size(data):
                 instance_fields_size, cd_off = read_uleb128(data, cd_off)
                 direct_methods_size, cd_off = read_uleb128(data, cd_off)
                 virtual_methods_size, cd_off = read_uleb128(data, cd_off)
-                for _ in range(static_fields_size):
+                for _ in range(min(static_fields_size, 10000)):
                     _, cd_off = read_uleb128(data, cd_off)
                     _, cd_off = read_uleb128(data, cd_off)
-                for _ in range(instance_fields_size):
+                for _ in range(min(instance_fields_size, 10000)):
                     _, cd_off = read_uleb128(data, cd_off)
                     _, cd_off = read_uleb128(data, cd_off)
-                for _ in range(direct_methods_size):
+                for _ in range(min(direct_methods_size, 10000)):
                     _, cd_off = read_uleb128(data, cd_off)
                     _, cd_off = read_uleb128(data, cd_off)
                     code_off, cd_off = read_uleb128(data, cd_off)
                     if code_off > 0 and code_off < len(data):
                         code_items.add(code_off)
-                for _ in range(virtual_methods_size):
+                for _ in range(min(virtual_methods_size, 10000)):
                     _, cd_off = read_uleb128(data, cd_off)
                     _, cd_off = read_uleb128(data, cd_off)
                     code_off, cd_off = read_uleb128(data, cd_off)
@@ -729,7 +791,9 @@ def calculate_dex_graph_size(data):
                 pass
 
         # 10. Parse Encoded Array Items
-        for ea_off in encoded_array_offsets:
+        for i_idx, ea_off in enumerate(encoded_array_offsets):
+            if i_idx > 50000:
+                break
             if ea_off in visited or ea_off >= len(data):
                 continue
             visited.add(ea_off)
@@ -740,7 +804,9 @@ def calculate_dex_graph_size(data):
                 pass
 
         # 11. Parse Code Items -> Debug Info Items
-        for code_off in code_items:
+        for i_idx, code_off in enumerate(code_items):
+            if i_idx > 50000:
+                break
             if code_off in visited or code_off + 16 > len(data):
                 continue
             visited.add(code_off)
@@ -776,6 +842,7 @@ def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
     检查、修复并智能转译单个 DEX/CDEX 文件。
     """
     filename = os.path.basename(filepath)
+    print(f"[*] 正在解析和修复: {filename}...")
     try:
         with open(filepath, 'rb') as f:
             data = bytearray(f.read())
@@ -837,16 +904,19 @@ def fix_dex_file(filepath, adb_device=None, force=False, stats=None):
                 file_size = real_size
 
             print(f"[*] CDEX {filename}: 检测到在线 Android 设备 {adb_device}，正在通过其一键转译为 Standard DEX...")
-            success, converted_data = convert_cdex_on_device(data, filename, adb_device)
-            if success and converted_data:
-                data = bytearray(converted_data)
-                file_size = len(data)
-                magic = data[0:4]
-                is_standard_dex = (magic == b'dex\n')
-                is_compact_dex = False
-                print(f"[+] CDEX {filename}: 一键转译标准 DEX 完美完成！自动进入后续校验与写回...")
-            else:
-                raise RuntimeError(f"CDEX {filename} 转译失败：设备端未生成有效转译结果")
+            try:
+                success, converted_data = convert_cdex_on_device(data, filename, adb_device)
+                if success and converted_data:
+                    data = bytearray(converted_data)
+                    file_size = len(data)
+                    magic = data[0:4]
+                    is_standard_dex = (magic == b'dex\n')
+                    is_compact_dex = False
+                    print(f"[+] CDEX {filename}: 一键转译标准 DEX 完美完成！自动进入后续校验与写回...")
+                else:
+                    print(f"[-] CDEX {filename}: 设备端转译失败：无有效转译产物")
+            except Exception as cdex_err:
+                print(f"[!] CDEX {filename}: 转译异常 (文件可能不完整或格式损坏): {cdex_err}")
         else:
             print(f"[~] CDEX {filename}: 检测到 Compact DEX，但当前无在线 Android 设备/模拟器，跳过转译，仅进行常规修复。")
 
@@ -935,16 +1005,29 @@ def fix_dex_directory(dirpath, adb_device=None):
     print(f"[*] 找到 {len(dex_files)} 个包含 DEX/CDEX 签名后缀的文件，开始智能批处理...")
     fixed_count = 0
     skipped_count = 0
+    failed_count = 0
+    consecutive_failures = 0
     stats = {'standard': 0, 'cdex': 0, 'erased': 0}
 
     for f in sorted(dex_files):
         p = os.path.join(dirpath, f)
-        if fix_dex_file(p, adb_device=adb_device, force=False, stats=stats):
-            fixed_count += 1
-        else:
-            skipped_count += 1
+        try:
+            if fix_dex_file(p, adb_device=adb_device, force=False, stats=stats):
+                fixed_count += 1
+                consecutive_failures = 0
+            else:
+                skipped_count += 1
+                consecutive_failures = 0
+        except Exception as e:
+            failed_count += 1
+            consecutive_failures += 1
+            print(f"[-] 修复文件 {f} 发生异常: {e}")
+            if consecutive_failures >= 15:
+                print(f"[!] 警告: 已连续发生 {consecutive_failures} 次修复异常，可能是大面积损坏或 ADB 挂死，安全跳出批处理。")
+                break
+            continue
 
-    print(f"\n[!] 批处理运行完毕！共转换/修复成功: {fixed_count} 个文件，跳过无需变动的正常文件: {skipped_count} 个。")
+    print(f"\n[!] 批处理运行完毕！共转换/修复成功: {fixed_count} 个文件，失败: {failed_count} 个，跳过无需变动的正常文件: {skipped_count} 个。")
     print(f"[*] ------------------------------------------------------------")
     print(f"[*] 【DEX/CDEX 格式特征扫描统计】:")
     print(f"[*]     1. 标准 DEX 格式 (Standard DEX): {stats['standard']} 个")
